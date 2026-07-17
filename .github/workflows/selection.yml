@@ -9,7 +9,7 @@ on:
 jobs:
   stock-selection:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4
@@ -37,12 +37,12 @@ jobs:
 
       - name: Backfill historical data (first run only)
         if: steps.restore-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
         run: python main.py --backfill
         env:
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
 
       - name: Daily selection + Feishu push
-        if: steps.restore-cache.outputs.cache-hit == 'true'
         run: python main.py
         env:
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
