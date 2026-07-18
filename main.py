@@ -59,7 +59,11 @@ def main() -> None:
 
         # ── 日常模式：单次 API 补今天 + 策略 + 推送 ──
         logger.info("开始拉取最新快照...")
-        count = engine.sync_today_bulk()
+        # 优先用东方财富 API（秒级完成），失败回退 baostock 多进程
+        count = engine.sync_today_eastmoney()
+        if count < 0:
+            logger.warning("东方财富 API 失败，回退到 baostock 多进程同步...")
+            count = engine.sync_today_bulk()
         logger.info(f"快照同步完成，写入 {count} 只股票")
 
         # 4. 策略列表（新增策略在此追加即可）
