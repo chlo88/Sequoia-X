@@ -138,3 +138,123 @@ class FeishuNotifier:
 
         except requests.RequestException as exc:
             logger.error(f"飞书推送请求异常 [{webhook_key}]：{exc}")
+
+    # ── 综合资金面推荐 ──
+
+    @staticmethod
+    def _fmt_amount(wan: float) -> str:
+        """将万元金额格式化为易读字符串：>=1亿显示'X.XX亿'，否则'XX万'。"""
+        if abs(wan) >= 10000:
+            return f"{wan / 10000:.2f}亿"
+        return f"{wan:.0f}万"
+
+    def _build_top_picks_card(self, picks: list[dict]) -> dict:
+        """构建综合推荐飞书卡片。
+
+        Args:
+            picks: 综合筛选后的推荐列表，每项含 name/symbol/close/chg_pct/
+                   main_net/net_5d/net_10d/strategy_count/score/reason。
+        """
+        today = date.today().strftime("%Y-%m-%d")
+
+        elements: list[dict] = [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**日期：** {today}\n**候选池：** 综合全策略选股 + 资金流向筛选",
+                },
+            },
+            {"tag": "hr"},
+        ]
+
+        medals = ["🥇", "🥈", "🥉"]
+        for i, p in enumerate(picks):
+            medal = medals[i] if i < len(medals) else "🔹"
+            xq_code = self._to_xueqiu_code(p["symbol"])
+            chg_icon = "🔺" if p["chg_pct"] >= 0 else "🔻"
+            main_icon = "🔴" if p["main_net"] >= 0 else "🟢"
+            net5d_icon = "🔴" if p["net_5d"] >= 0 else "🟢"
+
+            content = (
+                f"{medal} **[{p['name']}](https://xueqiu.com/S/{xq_code})** "
+                f"({p['symbol']})\n"
+                f"　现价 **{p['close']:.2f}** {chg_icon}{p['chg_pct']:+.2f}%　"
+                f"换手 {p.get('turnover_rate', 0):.1f}%\n"
+                f"　主力净流入 {main_icon}{self._fmt_amount(p['main_net'])}　"
+                f"5日 {net5d_icon}{self._fmt_amount(p['net_5d'])}　"
+                f"10日 {self._fmt_amount(p['net_10d'])}\n"
+                f"　策略交叉 **{p['strategy_count']}** 个　评分 **{p['score']}**\n"
+                f"　💡 {p['reason']}"
+            )
+            elements.append(
+                {"tag": "div", "text": {"tag": "lark_md", "content": content}}
+            )
+            if i < len(picks) - 1:
+                elements.append({"tag": "hr"})
+
+        elements.append({"tag": "hr"})
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": "> ⚠️ 以上基于多策略交叉 + 资金流向的客观分析，不构成投资建议。入市有风险，陈哥自决。",
+                },
+            }
+        )
+
+        return {
+            "msg_type": "interactive",
+            "card": {
+                "header": {
+                    "title": {
+                        "tag": "plain_text",
+                        "content": "🎯 缅A | Sequoia-X 综合推荐 | 资金面精选",
+                    },
+                    "template": "red",
+                },
+                "elements": elements,
+            },
+        }
+
+    def send_top_picks(
+        self,
+        picks: list[dict],
+        webhook_key: str = "default",
+    ) -> None:
+        """推送综合资金面推荐卡片至飞书群。
+
+        在所有策略选股推送完成后，汇总候选池 + 资金流向 + 综合评分，
+        选出 2-3 只可买入标的，作为最后一条推送。
+
+        Args:
+            picks: 综合筛选后的推荐列表。
+            webhook_key: 飞书 webhook 标识，默认 'default'。
+        """
+        if not picks:
+            logger.info("无综合推荐结果，跳过推送")
+            return
+
+        url = self.settings.get_webhook_url(webhook_key)
+        payload = self._build_top_picks_card(picks)
+
+        try:
+            resp = requests.post(
+                url,
+                data=json.dumps(payload),
+                headers={"Content-Type": "application/json"},
+                timeout=10,
+            )
+            resp_json = resp.json()
+            if resp.status_code != 200 or resp_json.get("code") != 0:
+                logger.error(
+                    f"综合推荐推送失败 [{webhook_key}] "
+                    f"HTTP状态={resp.status_code} 飞书响应={resp.text}"
+                )
+            else:
+                logger.info(
+                    f"综合推荐推送成功 [{webhook_key}]，共 {len(picks)} 只股票"
+                )
+        except requests.RequestException as exc:
+            logger.error(f"综合推荐推送请求异常 [{webhook_key}]：{exc}")
