@@ -9,7 +9,7 @@ on:
 jobs:
   stock-selection:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
@@ -25,31 +25,18 @@ jobs:
           pip install --upgrade pip
           pip install .
 
-      - name: Restore database cache
-        uses: actions/cache@v4
-        id: restore-cache
-        with:
-          path: data/sequoia_v2.db
-          key: sequoia-v2-db-v1
-
       - name: Create data directory
         run: mkdir -p data
 
-      - name: Backfill historical data (first run only)
-        if: steps.restore-cache.outputs.cache-hit != 'true'
-        continue-on-error: true
-        run: python main.py --backfill
+      - name: Download pre-built database
+        run: |
+          gh release download db-v1 --repo chlo88/Sequoia-X --pattern "sequoia_v2.db.gz" --dir data/
+          gunzip data/sequoia_v2.db.gz
+          ls -lh data/sequoia_v2.db
         env:
-          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Daily selection + Feishu push
         run: python main.py
         env:
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
-
-      - name: Save database cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: data/sequoia_v2.db
-          key: sequoia-v2-db-v1-${{ github.run_id }}
