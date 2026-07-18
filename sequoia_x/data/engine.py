@@ -94,6 +94,121 @@ class DataEngine:
 
     # ── 数据同步 ──
 
+    def sync_today_eastmoney(self) -> int:
+        """通过东方财富 API 批量拉取全市场当天行情（一次请求，秒级完成）。
+
+        相比 baostock 的逐只查询（5000 只 × 跨洋延迟 = 20 分钟），
+        东方财富一次 HTTP 请求即可拿到全市场行情，2~3 秒完成。
+
+        返回值：
+          >=0: 成功写入的记录数（0 表示非交易日或无需更新）
+          -1:  API 请求失败，调用方应回退到 baostock
+        """
+        import requests
+        from datetime import date
+
+        url = "https://push2.eastmoney.com/api/qt/clist/get"
+        params = {
+            "pn": 1,
+            "pz": 10000,
+            "po": 1,
+            "np": 1,
+            "fltt": 2,
+            "invt": 2,
+            "fid": "f12",
+            "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
+            "fields": "f12,f14,f2,f5,f6,f15,f16,f17,f18",
+        }
+        req_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://quote.eastmoney.com",
+        }
+
+        try:
+            r = requests.get(url, params=params, headers=req_headers, timeout=15)
+            data = r.json()
+            diff = data["data"]["diff"]
+            logger.info(f"东方财富 API 返回 {len(diff)} 只股票")
+        except Exception as e:
+            logger.error(f"东方财富 API 请求失败: {e}")
+            return -1
+
+        today_str = date.today().strftime("%Y-%m-%d")
+
+        # 非交易日检测：抽样对比数据库最后一天的数据
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT MAX(date) FROM stock_daily").fetchone()
+            last_date = row[0] if row else None
+
+            if last_date:
+                sample = diff[0]
+                sample_symbol = sample["f12"]
+                sample_close = sample.get("f2")
+                db_row = conn.execute(
+                    "SELECT close FROM stock_daily WHERE symbol=? AND date=?",
+                    (sample_symbol, last_date),
+                ).fetchone()
+                if (
+                    db_row
+                    and sample_close not in ("-", "", None)
+                    and abs(float(db_row[0]) - float(sample_close)) < 0.001
+                ):
+                    logger.info(
+                        f"东方财富数据与数据库最后一天({last_date})一致，"
+                        f"非交易日或已同步，跳过"
+                    )
+                    return 0
+
+        # 转换数据
+        rows = []
+        for s in diff:
+            try:
+                symbol = s["f12"]
+                close = s.get("f2")
+                if close in ("-", "", None, 0):
+                    continue
+                volume = s.get("f5")
+                if volume in ("-", "", None, 0):
+                    continue
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "date": today_str,
+                        "open": float(s["f17"]),
+                        "high": float(s["f15"]),
+                        "low": float(s["f16"]),
+                        "close": float(close),
+                        "volume": int(volume),
+                        "turnover": float(s["f6"])
+                        if s.get("f6") not in ("-", "", None, 0)
+                        else 0.0,
+                    }
+                )
+            except (KeyError, ValueError, TypeError):
+                continue
+
+        if not rows:
+            logger.info("东方财富 API 无有效数据")
+            return 0
+
+        df = pd.DataFrame(rows)
+        count = len(df)
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM stock_daily WHERE date = ?", (today_str,))
+            df.to_sql(
+                "stock_daily",
+                conn,
+                if_exists="append",
+                index=False,
+                method="multi",
+                chunksize=500,
+            )
+            conn.commit()
+
+        logger.info(f"sync_today_eastmoney: 写入 {count} 条数据")
+        return count
+
     def sync_today_bulk(self) -> int:
         """多进程并行通过 baostock 拉取增量数据（后复权），写入 SQLite。"""
         from datetime import date, timedelta
