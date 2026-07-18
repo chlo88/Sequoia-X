@@ -440,6 +440,74 @@ class DataEngine:
         finally:
             bs.logout()
 
+    # ── 资金流向查询 ──
+
+    def get_fund_flow(self, symbols: list[str]) -> dict[str, dict]:
+        """通过东方财富 API 批量查询指定股票的资金流向数据。
+
+        一次 HTTP 请求即可拿到所有指定股票的主力净流入、5日/10日净流入、
+        涨跌幅、换手率等数据，用于综合筛选可买入标的。
+
+        Args:
+            symbols: 股票代码列表（纯数字，如 ['300015', '002422']）。
+
+        Returns:
+            {symbol: {name, close, chg_pct, main_net, main_pct,
+                      net_5d, net_10d, turnover_rate}} 映射。
+            查询失败的股票不会出现在返回值中。
+        """
+        if not symbols:
+            return {}
+
+        import requests
+
+        # 构建 secids：6/9 开头 → 沪市(1.)，其余 → 深市(0.)
+        secids = ",".join(
+            f"{'1' if s.startswith(('6', '9')) else '0'}.{s}" for s in symbols
+        )
+
+        url = "https://push2.eastmoney.com/api/qt/ulist.np/get"
+        params = {
+            "secids": secids,
+            "fields": "f12,f14,f2,f3,f6,f7,f62,f184,f267,f173,f269,f175",
+            "fltt": 2,
+        }
+        req_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://quote.eastmoney.com",
+        }
+
+        try:
+            r = requests.get(url, params=params, headers=req_headers, timeout=15)
+            data = r.json()
+            diff = data.get("data", {}).get("diff", [])
+            logger.info(f"资金流向查询成功，返回 {len(diff)} 只股票")
+        except Exception as e:
+            logger.error(f"资金流向 API 请求失败: {e}")
+            return {}
+
+        result: dict[str, dict] = {}
+        for s in diff:
+            try:
+                symbol = s["f12"]
+                close = s.get("f2")
+                if close in ("-", "", None):
+                    continue
+                result[symbol] = {
+                    "name": s.get("f14", symbol),
+                    "close": float(close),
+                    "chg_pct": float(s.get("f3", 0)),
+                    "main_net": float(s.get("f62", 0)) / 1e4,       # 元 → 万元
+                    "main_pct": float(s.get("f184", 0)),
+                    "net_5d": float(s.get("f267", 0)) / 1e4,        # 元 → 万元
+                    "net_10d": float(s.get("f269", 0)) / 1e4,       # 元 → 万元
+                    "turnover_rate": float(s.get("f7", 0)),
+                }
+            except (KeyError, ValueError, TypeError):
+                continue
+
+        return result
+
     def get_local_symbols(self) -> list[str]:
         with sqlite3.connect(self.db_path) as conn:
             rows = conn.execute(
